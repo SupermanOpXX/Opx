@@ -1,14 +1,12 @@
-name: Sync 4.2 folders (auto-detect + fallback, SHA compare)
+name: Mirror hosting -> GitHub (4.2 folders)
 
 on:
   schedule:
     - cron: "*/1 * * * *"   # every 1 minute (UTC)
   workflow_dispatch:
-  push:
-    branches: ["main"]      # run immediately when you delete a file from GitHub
 
 concurrency:
-  group: sync-4-2
+  group: mirror-4-2
   cancel-in-progress: true
 
 jobs:
@@ -20,17 +18,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sync folders (SHA + UA)
+      - name: Sync from hosting (200=keep/upload, 404=delete, SHA=update)
         shell: bash
         run: |
           set -euo pipefail
 
           BASE_URL="https://nskmedia.net/rizwan/4.2"
           FILE_NAME="libopenplatform.so"
-
-          SAFE_MODE_KEEP_ON_404=0
-
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+
+          # Folders you want mirrored (plus any already in repo)
+          fallback=(GL KR TW VNG)
 
           sync_one () {
             local folder="$1"
@@ -50,26 +48,29 @@ jobs:
             code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
             echo "HTTP: $code"
 
+            # Hosting 404 -> delete from GitHub
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
-              if [[ "$SAFE_MODE_KEEP_ON_404" == "1" ]]; then
-                echo "404 received -> keeping existing: $dest"
-                return 0
+              if [[ -f "$dest" ]]; then
+                rm -f "$dest"
+                echo "HOSTING 404 -> DELETED from GitHub: $dest"
+              else
+                echo "HOSTING 404 -> already missing on GitHub: $dest"
               fi
-              echo "Remote 404 -> deleting: $dest"
-              rm -f "$dest"
               return 0
             fi
 
+            # Any non-200/404 -> do nothing (avoid accidental changes on transient errors)
             if [[ "$code" != "200" ]]; then
-              echo "Download failed (HTTP $code) -> skip"
+              echo "HOSTING HTTP $code -> SKIP (no changes)"
               rm -f "$tmp"
               return 0
             fi
 
+            # Hosting 200 -> ensure file exists / updated by SHA
             if [[ ! -f "$dest" ]]; then
               mv -f "$tmp" "$dest"
-              echo "MISSING -> DOWNLOADED: $dest"
+              echo "HOSTING 200 + GitHub missing -> UPLOADED: $dest"
               return 0
             fi
 
@@ -78,26 +79,23 @@ jobs:
             sha_old="$(sha256sum "$dest" | awk '{print $1}')"
 
             if [[ "$sha_new" == "$sha_old" ]]; then
-              echo "EXISTS -> SAME SHA (no change): $dest"
               rm -f "$tmp"
+              echo "HOSTING same file -> NO CHANGE: $dest"
               return 0
             fi
 
             mv -f "$tmp" "$dest"
-            echo "EXISTS -> UPDATED (SHA changed): $dest"
+            echo "HOSTING changed -> UPDATED on GitHub: $dest"
           }
 
-          # auto-detect from repo
+          # Auto-detect existing folders in repo (if any)
           shopt -s nullglob
           detected=()
           for d in 4.2/*/ ; do
             detected+=("$(basename "$d")")
           done
 
-          # fallback list
-          fallback=(GL KR TW VNG)
-
-          # merge unique
+          # Merge detected + fallback unique
           folders=("${detected[@]}" "${fallback[@]}")
           uniq=()
           for f in "${folders[@]}"; do
@@ -112,14 +110,10 @@ jobs:
             sync_one "$folder"
           done
 
-          # (Optional) heartbeat to keep repo active
-          mkdir -p .sync
-          date -u +"%Y-%m-%d %H:%M:%S UTC" > .sync/last_run.txt
-
-      - name: Commit & push if changed
+      - name: Commit & push if changed (handles non-fast-forward)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -131,5 +125,19 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Auto-sync 4.2 folders (SHA compare)"
-          git push
+          git commit -m "Mirror hosting 4.2 folders" || true
+
+          # Rebase onto latest main then push (retry)
+          for i in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main || (git rebase --abort && git pull --rebase origin main)
+            if git push origin HEAD:main; then
+              echo "Push success"
+              exit 0
+            fi
+            echo "Push failed, retrying... ($i)"
+            sleep 2
+          done
+
+          echo "Push failed after retries"
+          exit 1

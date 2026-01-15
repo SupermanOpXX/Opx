@@ -2,7 +2,7 @@ name: Sync 4.2 from hosting (libs)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/1 * * * *"
   workflow_dispatch:
 
 permissions:

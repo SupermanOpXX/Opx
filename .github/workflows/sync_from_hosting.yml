@@ -1,4 +1,4 @@
-name: Mirror hosting -> GitHub (recursive /rizwan)
+name: Mirror hosting -> GitHub (mixed paths + auto filename)
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: mirror-rizwan
+  group: mirror-hosting
   cancel-in-progress: true
 
 jobs:
@@ -18,64 +18,59 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Recursive mirror (200=upload/keep, 404=delete, SHA=update)
+      - name: Mirror hosting (200=upload/keep, 404=delete, SHA=update)
         shell: bash
         run: |
           set -euo pipefail
 
-          HOST_BASE="https://nskmedia.net/rizwan"
-          REPO_PREFIX="rizwan"   # GitHub me yahan mirror banega: rizwan/...
+          # Base roots
+          BASE_ROOT="https://nskmedia.net/rizwan"
+          BASE_42="https://nskmedia.net/rizwan/4.2"
 
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
-          # If root listing is blocked, we still crawl these known dirs (from your screenshot)
-          SEED_DIRS=(4.2 BGMI BPSTOPHERE GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
+          # Folders that live under /rizwan/4.2/<folder>/
+          FOLDERS_42=(GL KR TW VNG)
 
-          # Safety limits (avoid infinite loops / huge trees)
-          MAX_DEPTH=6
-          MAX_FILES=5000
+          # Folders that live under /rizwan/<folder>/
+          FOLDERS_ROOT=(BGMI BPSTOPHERE GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
 
-          shopt -s extglob nullglob
+          # If folder listing is blocked, we will try these file names
+          FALLBACK_FILES=("libopenplatform.so")
 
-          declare -A VISITED_DIRS
-          declare -A SEEN_FILES
-          files_count=0
-
-          # -------- helpers --------
-          norm_rel() {
-            local p="$1"
-            p="${p#./}"
-            p="${p#/}"
-            echo "$p"
+          is_in_array () {
+            local x="$1"; shift
+            for i in "$@"; do [[ "$i" == "$x" ]] && return 0; done
+            return 1
           }
 
-          fetch_listing() {
-            # outputs html path if 200, else empty
-            local url="$1"
-            local html
+          # Try to discover real file names from folder listing HTML (if available)
+          discover_files () {
+            local folder_url="$1"
+
+            # Fetch listing page (may be 200/403/etc)
+            local html code
             html="$(mktemp)"
-            local code
-            code="$(curl -L -A "$UA" -sS -o "$html" -w "%{http_code}" "${url}/" || true)"
+            code="$(curl -L -A "$UA" -sS -o "$html" -w "%{http_code}" "${folder_url}/" || true)"
+
             if [[ "$code" != "200" ]]; then
               rm -f "$html"
               return 1
             fi
-            echo "$html"
+
+            # Extract href="filename" entries, skip dirs, parent links, query links
+            # Works for common Apache/cPanel listings.
+            grep -Eo 'href="[^"]+"' "$html" \
+              | sed 's/^href="//; s/"$//' \
+              | grep -vE '^\?|^/|^\.\./|/$' \
+              | grep -E '\.' \
+              | sort -u
+
+            rm -f "$html"
             return 0
           }
 
-          # Parse links from common Apache/cPanel autoindex HTML:
-          # - dirs end with /
-          # - files have dot/ext etc
-          parse_links() {
-            local html="$1"
-            # get href targets
-            grep -Eo 'href="[^"]+"' "$html" \
-              | sed 's/^href="//; s/"$//' \
-              | sed 's/%20/ /g'
-          }
-
-          sync_file() {
+          sync_file () {
             local url="$1"
             local dest="$2"
 
@@ -86,18 +81,18 @@ jobs:
             local code
             code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
 
-            echo "FILE URL : $url"
-            echo "DEST     : $dest"
-            echo "HTTP     : $code"
+            echo "URL : $url"
+            echo "DEST: $dest"
+            echo "HTTP: $code"
 
             # Hosting 404 -> delete from GitHub
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ -f "$dest" ]]; then
                 rm -f "$dest"
-                echo "HOST 404 -> DELETED: $dest"
+                echo "HOSTING 404 -> DELETED: $dest"
               else
-                echo "HOST 404 -> already missing: $dest"
+                echo "HOSTING 404 -> already missing: $dest"
               fi
               return 0
             fi
@@ -105,14 +100,14 @@ jobs:
             # Non-200/404 -> safe skip
             if [[ "$code" != "200" ]]; then
               rm -f "$tmp"
-              echo "HOST HTTP $code -> SKIP"
+              echo "HOSTING HTTP $code -> SKIP (no changes)"
               return 0
             fi
 
             # 200 -> upload/update by SHA
             if [[ ! -f "$dest" ]]; then
               mv -f "$tmp" "$dest"
-              echo "HOST 200 + missing -> UPLOADED: $dest"
+              echo "HOSTING 200 + missing -> UPLOADED: $dest"
               return 0
             fi
 
@@ -122,130 +117,56 @@ jobs:
 
             if [[ "$sha_new" == "$sha_old" ]]; then
               rm -f "$tmp"
-              echo "SAME SHA -> NO CHANGE: $dest"
+              echo "HOSTING same -> NO CHANGE: $dest"
               return 0
             fi
 
             mv -f "$tmp" "$dest"
-            echo "SHA changed -> UPDATED: $dest"
+            echo "HOSTING changed -> UPDATED: $dest"
           }
 
-          crawl_dir() {
-            local rel="$1"
-            local depth="$2"
+          process_folder () {
+            local folder="$1"
+            local base="$2"
+            local dest_prefix="$3"
 
-            rel="$(norm_rel "$rel")"
-            [[ -z "$rel" ]] && rel="."
+            local folder_url="${base}/${folder}"
 
-            # depth limit
-            if (( depth > MAX_DEPTH )); then
-              echo "DEPTH LIMIT reached at: $rel"
-              return 0
-            fi
+            echo "=============================="
+            echo "FOLDER: $folder"
+            echo "BASE  : $base"
+            echo "PATH  : $folder_url"
+            echo "DESTP : $dest_prefix"
+            echo "=============================="
 
-            # avoid cycles
-            if [[ -n "${VISITED_DIRS[$rel]:-}" ]]; then
-              return 0
-            fi
-            VISITED_DIRS[$rel]=1
+            # Try discover real files in this folder
+            mapfile -t files < <(discover_files "$folder_url" || true)
 
-            local url
-            if [[ "$rel" == "." ]]; then
-              url="$HOST_BASE"
+            if [[ "${#files[@]}" -eq 0 ]]; then
+              # Fallback
+              files=("${FALLBACK_FILES[@]}")
+              echo "No listing found -> fallback files: ${files[*]}"
             else
-              url="$HOST_BASE/$rel"
+              echo "Detected files: ${files[*]}"
             fi
 
-            local html
-            if ! html="$(fetch_listing "$url")"; then
-              echo "No listing (blocked or not 200) -> skip dir discovery: $url"
-              return 0
-            fi
-
-            echo "---- LISTING OK: $url/"
-
-            # read all hrefs
-            while IFS= read -r href; do
-              # skip empties
-              [[ -z "$href" ]] && continue
-
-              # skip parent/self/query/absolute
-              [[ "$href" == "../" ]] && continue
-              [[ "$href" == "./" ]] && continue
-              [[ "$href" == \?* ]] && continue
-              [[ "$href" == /* ]] && continue
-              [[ "$href" == http* ]] && continue
-
-              # directory
-              if [[ "$href" == */ ]]; then
-                local sub="${href%/}"
-                local next
-                if [[ "$rel" == "." ]]; then
-                  next="$sub"
-                else
-                  next="$rel/$sub"
-                fi
-                crawl_dir "$next" $((depth+1))
-                continue
-              fi
-
-              # file
-              local file_rel
-              if [[ "$rel" == "." ]]; then
-                file_rel="$href"
-              else
-                file_rel="$rel/$href"
-              fi
-
-              files_count=$((files_count+1))
-              if (( files_count > MAX_FILES )); then
-                echo "FILE LIMIT reached (${MAX_FILES}). Stopping."
-                rm -f "$html"
-                return 0
-              fi
-
-              # mark as seen
-              SEEN_FILES["$file_rel"]=1
-
-              # sync it
-              local file_url="$HOST_BASE/$file_rel"
-              local dest_path="$REPO_PREFIX/$file_rel"
-              sync_file "$file_url" "$dest_path"
-
-            done < <(parse_links "$html")
-
-            rm -f "$html"
+            # Sync each file
+            for fname in "${files[@]}"; do
+              local url="${folder_url}/${fname}"
+              local dest="${dest_prefix}/${folder}/${fname}"
+              sync_file "$url" "$dest"
+            done
           }
 
-          echo "=== START: recursive mirror of /rizwan ==="
-
-          # 1) try crawl root (best case)
-          crawl_dir "." 0
-
-          # 2) also crawl seed dirs (in case root listing blocked)
-          for d in "${SEED_DIRS[@]}"; do
-            crawl_dir "$d" 1
+          # Sync /rizwan/4.2/<folder>/...  -> repo: 4.2/<folder>/...
+          for f in "${FOLDERS_42[@]}"; do
+            process_folder "$f" "$BASE_42" "4.2"
           done
 
-          echo "=== DISCOVERY DONE. Seen files: ${#SEEN_FILES[@]} ==="
-
-          # Delete files that are in GitHub but not on hosting listing (only if we saw something)
-          if (( ${#SEEN_FILES[@]} > 0 )); then
-            echo "=== DELETE missing files in repo under ${REPO_PREFIX}/ ==="
-            if [[ -d "$REPO_PREFIX" ]]; then
-              while IFS= read -r f; do
-                # convert repo path to hosting relative path
-                rel="${f#${REPO_PREFIX}/}"
-                rel="$(norm_rel "$rel")"
-                if [[ -z "${SEEN_FILES[$rel]:-}" ]]; then
-                  echo "NOT ON HOST LIST -> deleting from repo: $f"
-                  rm -f "$f"
-                fi
-              done < <(find "$REPO_PREFIX" -type f)
-            fi
-          else
-            echo "No file listing discovered (SEEN=0) -> skip mass delete for safety."
-          fi
+          # Sync /rizwan/<folder>/...      -> repo: <folder>/...
+          for f in "${FOLDERS_ROOT[@]}"; do
+            process_folder "$f" "$BASE_ROOT" "."
+          done
 
       - name: Commit & push if changed (rebase + retry)
         shell: bash
@@ -262,7 +183,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Mirror hosting /rizwan (recursive)" || true
+          git commit -m "Mirror hosting folders" || true
 
           for i in 1 2 3; do
             git fetch origin main

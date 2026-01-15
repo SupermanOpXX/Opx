@@ -1,8 +1,8 @@
-name: Sync 4.2 from hosting (delete if missing)
+name: Sync 4.2 from hosting (libs)
 
 on:
   schedule:
-    - cron: "*/2 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,57 +19,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Sync folders (download if 200, delete if 404)
+      # ✅ IMPORTANT: if your repo has *.so in .gitignore, this will still force add it.
+      - name: Download latest libs from hosting
         run: |
           set -e
           BASE="https://nskmedia.net/rizwan/4.2"
-          mkdir -p 4.2
+          FILE="libopenplatform.so"
 
-          sync_one () {
-            DIR="$1"
-            FILE="libopenplatform.so"
+          for DIR in GL KR TW VNG; do
+            mkdir -p "4.2/$DIR"
             URL="$BASE/$DIR/$FILE?cb=$(date +%s)"
             OUT="4.2/$DIR/$FILE"
-
-            mkdir -p "4.2/$DIR"
-
-            # Check if exists on hosting
-            CODE=$(curl -L -s -o /dev/null -w "%{http_code}" "$URL" || true)
-
-            if [ "$CODE" = "200" ]; then
-              echo "[$DIR] exists (200) -> downloading"
-              curl -L --fail --retry 3 --retry-delay 2 -o "$OUT" "$URL"
-            else
-              echo "[$DIR] missing ($CODE) -> deleting from GitHub if exists"
-              rm -f "$OUT"
-              # also remove empty dir if no files
-              rmdir "4.2/$DIR" 2>/dev/null || true
-            fi
-          }
-
-          for D in GL KR TW VNG; do
-            sync_one "$D"
+            echo "Downloading $URL -> $OUT"
+            curl -L --fail --retry 3 --retry-delay 2 -o "$OUT" "$URL"
+            ls -lah "4.2/$DIR" || true
           done
 
-          # status file (same logic)
-          STATUS_URL="$BASE/status?cb=$(date +%s)"
-          STATUS_CODE=$(curl -L -s -o /dev/null -w "%{http_code}" "$STATUS_URL" || true)
-          if [ "$STATUS_CODE" = "200" ]; then
-            curl -L --fail --retry 3 --retry-delay 2 -o "4.2/status" "$STATUS_URL"
-          else
-            rm -f "4.2/status"
-          fi
+          # status file
+          curl -L --fail --retry 3 --retry-delay 2 \
+            -o "4.2/status" \
+            "$BASE/status?cb=$(date +%s)"
 
       - name: Commit & push if changed
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if git diff --quiet; then
+          # ✅ Force-add libs even if .gitignore has *.so
+          git add -f 4.2/GL/libopenplatform.so 4.2/KR/libopenplatform.so 4.2/TW/libopenplatform.so 4.2/VNG/libopenplatform.so 4.2/status
+
+          # If nothing staged, stop
+          if git diff --cached --quiet; then
             echo "No changes"
             exit 0
           fi
 
-          git add 4.2
-          git commit -m "Auto-sync 4.2 from hosting (with deletes)"
-          git push
+          git commit -m "Auto-sync 4.2 libs from hosting"
+          git push origin HEAD:main

@@ -2,7 +2,7 @@ name: Sync 4.2 from hosting (delete if missing)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/2 * * * *"
   workflow_dispatch:
 
 permissions:

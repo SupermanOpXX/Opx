@@ -1,0 +1,3 @@
+*.so merge=ours -text
+*.dll merge=ours -text
+*.exe merge=ours -text

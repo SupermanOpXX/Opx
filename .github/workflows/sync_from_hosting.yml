@@ -179,6 +179,14 @@ jobs:
             process_folder "$f" "$BASE_ROOT" "."
           done
 
+          # ✅ ADD: /rizwan/4.2/status -> 4.2/status
+          echo "=============================="
+          echo "SINGLE FILE: status (BASE_42)"
+          echo "=============================="
+          STATUS_URL="${BASE_42}/status"
+          STATUS_DEST="4.2/status"
+          sync_file "$STATUS_URL" "$STATUS_DEST"
+
       - name: Commit & push if changed (safe rebase for binary)
         shell: bash
         run: |

@@ -2,8 +2,10 @@ name: Sync 4.2 folders (auto-detect + fallback, SHA compare)
 
 on:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: "*/1 * * * *"   # every 1 minute (UTC)
   workflow_dispatch:
+  push:
+    branches: ["main"]      # run immediately when you delete a file from GitHub
 
 concurrency:
   group: sync-4-2
@@ -16,16 +18,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
-
-      - name: Force latest main
-        shell: bash
-        run: |
-          set -e
-          git fetch origin main --prune
-          git checkout main
-          git reset --hard origin/main
 
       - name: Sync folders (SHA + UA)
         shell: bash
@@ -35,8 +28,6 @@ jobs:
           BASE_URL="https://nskmedia.net/rizwan/4.2"
           FILE_NAME="libopenplatform.so"
 
-          # 0 = delete from GitHub if hosting returns 404
-          # 1 = keep existing GitHub file even if hosting returns 404
           SAFE_MODE_KEEP_ON_404=0
 
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
@@ -62,7 +53,7 @@ jobs:
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ "$SAFE_MODE_KEEP_ON_404" == "1" ]]; then
-                echo "404 received, SAFE_MODE=ON -> keeping existing: $dest"
+                echo "404 received -> keeping existing: $dest"
                 return 0
               fi
               echo "Remote 404 -> deleting: $dest"
@@ -96,13 +87,34 @@ jobs:
             echo "EXISTS -> UPDATED (SHA changed): $dest"
           }
 
-          # fallback folders (always check even if missing in repo)
-          folders=(GL KR TW VNG)
+          # auto-detect from repo
+          shopt -s nullglob
+          detected=()
+          for d in 4.2/*/ ; do
+            detected+=("$(basename "$d")")
+          done
 
-          echo "Folders to sync: ${folders[*]}"
-          for folder in "${folders[@]}"; do
+          # fallback list
+          fallback=(GL KR TW VNG)
+
+          # merge unique
+          folders=("${detected[@]}" "${fallback[@]}")
+          uniq=()
+          for f in "${folders[@]}"; do
+            [[ -z "$f" ]] && continue
+            if [[ ! " ${uniq[*]} " =~ " ${f} " ]]; then
+              uniq+=("$f")
+            fi
+          done
+
+          echo "Folders to sync: ${uniq[*]}"
+          for folder in "${uniq[@]}"; do
             sync_one "$folder"
           done
+
+          # (Optional) heartbeat to keep repo active
+          mkdir -p .sync
+          date -u +"%Y-%m-%d %H:%M:%S UTC" > .sync/last_run.txt
 
       - name: Commit & push if changed
         shell: bash

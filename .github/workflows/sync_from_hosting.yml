@@ -5,6 +5,10 @@ on:
     - cron: "*/1 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: sync-4-2
+  cancel-in-progress: true
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -12,7 +16,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
+
+      - name: Force latest main
+        shell: bash
+        run: |
+          set -e
+          git fetch origin main --prune
+          git checkout main
+          git reset --hard origin/main
 
       - name: Sync folders (SHA + UA)
         shell: bash
@@ -83,28 +96,11 @@ jobs:
             echo "EXISTS -> UPDATED (SHA changed): $dest"
           }
 
-          # ---- 1) auto-detect folders if present ----
-          shopt -s nullglob
-          detected=()
-          for d in 4.2/*/ ; do
-            detected+=("$(basename "$d")")
-          done
+          # fallback folders (always check even if missing in repo)
+          folders=(GL KR TW VNG)
 
-          # ---- 2) fallback list (always check these) ----
-          fallback=(GL KR TW VNG)
-
-          # merge unique
-          folders=("${detected[@]}" "${fallback[@]}")
-          uniq=()
-          for f in "${folders[@]}"; do
-            [[ -z "$f" ]] && continue
-            if [[ ! " ${uniq[*]} " =~ " ${f} " ]]; then
-              uniq+=("$f")
-            fi
-          done
-
-          echo "Folders to sync: ${uniq[*]}"
-          for folder in "${uniq[@]}"; do
+          echo "Folders to sync: ${folders[*]}"
+          for folder in "${folders[@]}"; do
             sync_one "$folder"
           done
 

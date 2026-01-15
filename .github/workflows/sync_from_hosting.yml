@@ -1,4 +1,230 @@
+name: Mirror hosting -> GitHub (mixed paths + auto filename)
+
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # GitHub minimum schedule is every 5 minutes (UTC)
+    - cron: "3-59/5 * * * *"
   workflow_dispatch:
+
+concurrency:
+  group: mirror-hosting
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync to latest main (before download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+
+      - name: Mirror hosting (200=upload/keep, 404=delete, SHA=update)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_ROOT="https://nskmedia.net/rizwan"
+          BASE_42="https://nskmedia.net/rizwan/4.2"
+
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+
+          FOLDERS_42=(GL KR TW VNG)
+          FOLDERS_ROOT=(BGMI GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
+
+          FALLBACK_DEFAULT=("libopenplatform.so")
+
+          fallback_for_folder () {
+            local folder="$1"
+            case "$folder" in
+              BGMI)
+                printf "%s\n" "libopenplatform.so" "libswappy.so"
+                ;;
+              LOG)
+                printf "%s\n" "adb" "AdbWinApi"
+                ;;
+              *)
+                printf "%s\n" "${FALLBACK_DEFAULT[@]}"
+                ;;
+            esac
+          }
+
+          discover_files () {
+            local folder_url="$1"
+
+            local html code
+            html="$(mktemp)"
+            code="$(curl -L -A "$UA" -sS -o "$html" -w "%{http_code}" "${folder_url}/" || true)"
+
+            if [[ "$code" != "200" ]]; then
+              rm -f "$html"
+              return 1
+            fi
+
+            grep -Eo 'href="[^"]+"' "$html" \
+              | sed 's/^href="//; s/"$//' \
+              | grep -vE '^\?|^/|^\.\./|/$' \
+              | grep -E '\.' \
+              | sort -u
+
+            rm -f "$html"
+            return 0
+          }
+
+          sync_file () {
+            local url="$1"
+            local dest="$2"
+
+            mkdir -p "$(dirname "$dest")"
+            local tmp
+            tmp="$(mktemp)"
+
+            local code
+            code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
+
+            echo "URL : $url"
+            echo "DEST: $dest"
+            echo "HTTP: $code"
+
+            if [[ "$code" == "404" ]]; then
+              rm -f "$tmp"
+              if [[ -f "$dest" ]]; then
+                rm -f "$dest"
+                echo "HOSTING 404 -> DELETED: $dest"
+              else
+                echo "HOSTING 404 -> already missing: $dest"
+              fi
+              return 0
+            fi
+
+            if [[ "$code" != "200" ]]; then
+              rm -f "$tmp"
+              echo "HOSTING HTTP $code -> SKIP (no changes)"
+              return 0
+            fi
+
+            if [[ ! -f "$dest" ]]; then
+              mv -f "$tmp" "$dest"
+              echo "HOSTING 200 + missing -> UPLOADED: $dest"
+              return 0
+            fi
+
+            local sha_new sha_old
+            sha_new="$(sha256sum "$tmp" | awk '{print $1}')"
+            sha_old="$(sha256sum "$dest" | awk '{print $1}')"
+
+            if [[ "$sha_new" == "$sha_old" ]]; then
+              rm -f "$tmp"
+              echo "HOSTING same -> NO CHANGE: $dest"
+              return 0
+            fi
+
+            mv -f "$tmp" "$dest"
+            echo "HOSTING changed -> UPDATED: $dest"
+          }
+
+          process_folder () {
+            local folder="$1"
+            local base="$2"
+            local dest_prefix="$3"
+
+            local folder_url="${base}/${folder}"
+
+            echo "=============================="
+            echo "FOLDER: $folder"
+            echo "BASE  : $base"
+            echo "PATH  : $folder_url"
+            echo "DESTP : $dest_prefix"
+            echo "=============================="
+
+            mapfile -t files < <(discover_files "$folder_url" || true)
+
+            if [[ "${#files[@]}" -eq 0 ]]; then
+              mapfile -t files < <(fallback_for_folder "$folder")
+              echo "No listing found -> fallback files: ${files[*]}"
+            else
+              echo "Detected files: ${files[*]}"
+            fi
+
+            for fname in "${files[@]}"; do
+              local url="${folder_url}/${fname}"
+              local dest="${dest_prefix}/${folder}/${fname}"
+              sync_file "$url" "$dest"
+            done
+          }
+
+          for f in "${FOLDERS_42[@]}"; do
+            process_folder "$f" "$BASE_42" "4.2"
+          done
+
+          for f in "${FOLDERS_ROOT[@]}"; do
+            process_folder "$f" "$BASE_ROOT" "."
+          done
+
+          echo "=============================="
+          echo "SINGLE FILE: status (BASE_42)"
+          echo "=============================="
+          STATUS_URL="${BASE_42}/status"
+          STATUS_DEST="4.2/status"
+          sync_file "$STATUS_URL" "$STATUS_DEST"
+
+      - name: Commit & push if changed (safe rebase for binary)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git config merge.ours.driver true
+
+          if [[ ! -f .gitattributes ]]; then
+            cat > .gitattributes <<'EOF'
+          *.so merge=ours -text
+          *.dll merge=ours -text
+          *.exe merge=ours -text
+          EOF
+            git add .gitattributes
+          fi
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+
+          git commit -m "Mirror hosting folders" || true
+
+          for i in 1 2 3; do
+            git fetch origin main
+            if ! git pull --rebase --autostash origin main; then
+              git rebase --abort || true
+              echo "Rebase failed, retrying from fresh base... ($i)"
+              git fetch origin main
+              git reset --hard origin/main
+              git add -A
+              git commit -m "Mirror hosting folders" || true
+            fi
+
+            if git push origin HEAD:main; then
+              echo "Push success"
+              exit 0
+            fi
+
+            echo "Push failed, retrying... ($i)"
+            sleep 2
+          done
+
+          echo "Push failed after retries"
+          exit 1

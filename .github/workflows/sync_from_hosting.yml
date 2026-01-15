@@ -2,7 +2,7 @@ name: Mirror hosting -> GitHub (4.2 folders)
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # every 1 minute (UTC)
+    - cron: "*/1 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -27,8 +27,8 @@ jobs:
           FILE_NAME="libopenplatform.so"
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
-          # Folders you want mirrored (plus any already in repo)
-          fallback=(GL KR TW VNG)
+          # All folders from your hosting screenshot (+ any already in repo)
+          fallback=(GL KR TW VNG BGMI BPSTOPHERE GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
 
           sync_one () {
             local folder="$1"
@@ -48,7 +48,6 @@ jobs:
             code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
             echo "HTTP: $code"
 
-            # Hosting 404 -> delete from GitHub
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ -f "$dest" ]]; then
@@ -60,14 +59,12 @@ jobs:
               return 0
             fi
 
-            # Any non-200/404 -> do nothing (avoid accidental changes on transient errors)
             if [[ "$code" != "200" ]]; then
               echo "HOSTING HTTP $code -> SKIP (no changes)"
               rm -f "$tmp"
               return 0
             fi
 
-            # Hosting 200 -> ensure file exists / updated by SHA
             if [[ ! -f "$dest" ]]; then
               mv -f "$tmp" "$dest"
               echo "HOSTING 200 + GitHub missing -> UPLOADED: $dest"
@@ -88,14 +85,12 @@ jobs:
             echo "HOSTING changed -> UPDATED on GitHub: $dest"
           }
 
-          # Auto-detect existing folders in repo (if any)
           shopt -s nullglob
           detected=()
           for d in 4.2/*/ ; do
             detected+=("$(basename "$d")")
           done
 
-          # Merge detected + fallback unique
           folders=("${detected[@]}" "${fallback[@]}")
           uniq=()
           for f in "${folders[@]}"; do
@@ -127,7 +122,6 @@ jobs:
 
           git commit -m "Mirror hosting 4.2 folders" || true
 
-          # Rebase onto latest main then push (retry)
           for i in 1 2 3; do
             git fetch origin main
             git rebase origin/main || (git rebase --abort && git pull --rebase origin main)

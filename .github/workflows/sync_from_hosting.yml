@@ -1,21 +1,20 @@
-name: Sync 4.2 folders (auto-detect, SHA compare)
+name: Sync 4.2 folders (auto-detect + fallback, SHA compare)
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # every 1 minute
+    - cron: "*/1 * * * *"
   workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Sync auto-detected folders (SHA + UA)
+      - name: Sync folders (SHA + UA)
         shell: bash
         run: |
           set -euo pipefail
@@ -30,16 +29,18 @@ jobs:
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
           sync_one () {
-            local url="$1"
-            local dest="$2"
+            local folder="$1"
+            local url="${BASE_URL}/${folder}/${FILE_NAME}"
+            local dest="4.2/${folder}/${FILE_NAME}"
 
-            mkdir -p "$(dirname "$dest")"
+            mkdir -p "4.2/${folder}"
             local tmp
             tmp="$(mktemp)"
 
             echo "----"
-            echo "URL : $url"
-            echo "DEST: $dest"
+            echo "FOLDER: $folder"
+            echo "URL   : $url"
+            echo "DEST  : $dest"
 
             local code
             code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
@@ -48,10 +49,10 @@ jobs:
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ "$SAFE_MODE_KEEP_ON_404" == "1" ]]; then
-                echo "404 received, SAFE_MODE=ON -> keeping existing file: $dest"
+                echo "404 received, SAFE_MODE=ON -> keeping existing: $dest"
                 return 0
               fi
-              echo "Remote 404 -> deleting from repo (if exists): $dest"
+              echo "Remote 404 -> deleting: $dest"
               rm -f "$dest"
               return 0
             fi
@@ -82,21 +83,30 @@ jobs:
             echo "EXISTS -> UPDATED (SHA changed): $dest"
           }
 
-          echo "Auto-detecting folders in ./4.2/"
+          # ---- 1) auto-detect folders if present ----
           shopt -s nullglob
-          found=0
-
+          detected=()
           for d in 4.2/*/ ; do
-            found=1
-            folder="$(basename "$d")"
-            url="${BASE_URL}/${folder}/${FILE_NAME}"
-            dest="4.2/${folder}/${FILE_NAME}"
-            sync_one "$url" "$dest"
+            detected+=("$(basename "$d")")
           done
 
-          if [[ "$found" -eq 0 ]]; then
-            echo "No subfolders found under 4.2/. Create folders like 4.2/GL 4.2/VNG etc."
-          fi
+          # ---- 2) fallback list (always check these) ----
+          fallback=(GL KR TW VNG)
+
+          # merge unique
+          folders=("${detected[@]}" "${fallback[@]}")
+          uniq=()
+          for f in "${folders[@]}"; do
+            [[ -z "$f" ]] && continue
+            if [[ ! " ${uniq[*]} " =~ " ${f} " ]]; then
+              uniq+=("$f")
+            fi
+          done
+
+          echo "Folders to sync: ${uniq[*]}"
+          for folder in "${uniq[@]}"; do
+            sync_one "$folder"
+          done
 
       - name: Commit & push if changed
         shell: bash
@@ -113,5 +123,5 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Auto-sync 4.2/* (SHA compare)"
+          git commit -m "Auto-sync 4.2 folders (SHA compare)"
           git push

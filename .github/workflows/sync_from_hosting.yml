@@ -1,102 +1,54 @@
-name: Sync from Hosting (SHA compare)
+- name: Sync files (SHA compare)
+  shell: bash
+  run: |
+    set -euo pipefail
 
-on:
-  schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
+    UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    sync_one () {
+      local url="$1"
+      local dest="$2"
 
-      - name: Sync files (SHA compare)
-        shell: bash
-        run: |
-          set -euo pipefail
+      mkdir -p "$(dirname "$dest")"
+      tmp="$(mktemp)"
 
-          sync_one () {
-            local url="$1"
-            local dest="$2"
+      echo "----"
+      echo "URL : $url"
 
-            mkdir -p "$(dirname "$dest")"
+      code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
 
-            local tmp
-            tmp="$(mktemp)"
+      echo "HTTP: $code"
 
-            echo "----"
-            echo "URL : $url"
-            echo "DEST: $dest"
+      if [[ "$code" == "404" ]]; then
+        echo "Remote 404 → deleting local file"
+        rm -f "$tmp"
+        rm -f "$dest"
+        return 0
+      fi
 
-            # Download with HTTP status capture
-            local code
-            code="$(curl -L -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
+      if [[ "$code" != "200" ]]; then
+        echo "Download failed (HTTP $code), skipping"
+        rm -f "$tmp"
+        return 0
+      fi
 
-            if [[ "$code" == "404" ]]; then
-              echo "Remote 404 -> delete from repo if exists"
-              rm -f "$tmp"
-              if [[ -f "$dest" ]]; then
-                rm -f "$dest"
-                echo "Deleted: $dest"
-              else
-                echo "Already missing: $dest"
-              fi
-              return 0
-            fi
+      if [[ ! -f "$dest" ]]; then
+        mv "$tmp" "$dest"
+        echo "Added new file"
+        return 0
+      fi
 
-            if [[ "$code" != "200" ]]; then
-              echo "Download failed (HTTP $code). Keeping existing."
-              rm -f "$tmp"
-              return 0
-            fi
+      sha_new="$(sha256sum "$tmp" | awk '{print $1}')"
+      sha_old="$(sha256sum "$dest" | awk '{print $1}')"
 
-            # If file doesn't exist locally -> add
-            if [[ ! -f "$dest" ]]; then
-              mv -f "$tmp" "$dest"
-              echo "New file added: $dest"
-              return 0
-            fi
+      if [[ "$sha_new" == "$sha_old" ]]; then
+        echo "Same SHA → no change"
+        rm -f "$tmp"
+      else
+        mv "$tmp" "$dest"
+        echo "Updated (SHA changed)"
+      fi
+    }
 
-            # Compare SHA
-            local sha_new sha_old
-            sha_new="$(sha256sum "$tmp" | awk '{print $1}')"
-            sha_old="$(sha256sum "$dest" | awk '{print $1}')"
-
-            if [[ "$sha_new" == "$sha_old" ]]; then
-              echo "Same SHA -> no change"
-              rm -f "$tmp"
-              return 0
-            fi
-
-            # Replace if changed
-            mv -f "$tmp" "$dest"
-            echo "Updated (SHA changed): $dest"
-          }
-
-          # ---- ADD YOUR FILES HERE ----
-          sync_one "https://nskmedia.net/rizwan/4.2/GL/libopenplatform.so"  "4.2/GL/libopenplatform.so"
-          sync_one "https://nskmedia.net/rizwan/4.2/VNG/libopenplatform.so" "4.2/VNG/libopenplatform.so"
-
-          echo "Done syncing."
-
-      - name: Commit & push if changed
-        shell: bash
-        run: |
-          set -e
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add -A
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-
-          git commit -m "Auto-sync from hosting (SHA compare)"
-          git push
+    sync_one "https://nskmedia.net/rizwan/4.2/GL/libopenplatform.so"  "4.2/GL/libopenplatform.so"
+    sync_one "https://nskmedia.net/rizwan/4.2/VNG/libopenplatform.so" "4.2/VNG/libopenplatform.so"

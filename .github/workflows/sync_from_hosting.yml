@@ -2,7 +2,7 @@ name: Sync 4.2 folders (auto-detect, SHA compare)
 
 on:
   schedule:
-    - cron: "*/1 * * * *"   # every 1 minute (testing)
+    - cron: "*/1 * * * *"   # every 1 minute
   workflow_dispatch:
 
 jobs:
@@ -23,10 +23,8 @@ jobs:
           BASE_URL="https://nskmedia.net/rizwan/4.2"
           FILE_NAME="libopenplatform.so"
 
-          # 1 = testing (commit every run), 0 = production
-          TEST_MODE=1
-
-          # If you want "never delete on 404", set to 1
+          # 0 = delete from GitHub if hosting returns 404
+          # 1 = keep existing GitHub file even if hosting returns 404
           SAFE_MODE_KEEP_ON_404=0
 
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
@@ -50,10 +48,10 @@ jobs:
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ "$SAFE_MODE_KEEP_ON_404" == "1" ]]; then
-                echo "404 received, SAFE_MODE=ON -> keeping existing file"
+                echo "404 received, SAFE_MODE=ON -> keeping existing file: $dest"
                 return 0
               fi
-              echo "Remote 404 -> delete local if exists"
+              echo "Remote 404 -> deleting from repo (if exists): $dest"
               rm -f "$dest"
               return 0
             fi
@@ -66,7 +64,7 @@ jobs:
 
             if [[ ! -f "$dest" ]]; then
               mv -f "$tmp" "$dest"
-              echo "Added new file: $dest"
+              echo "MISSING -> DOWNLOADED: $dest"
               return 0
             fi
 
@@ -75,13 +73,13 @@ jobs:
             sha_old="$(sha256sum "$dest" | awk '{print $1}')"
 
             if [[ "$sha_new" == "$sha_old" ]]; then
-              echo "Same SHA -> no change"
+              echo "EXISTS -> SAME SHA (no change): $dest"
               rm -f "$tmp"
               return 0
             fi
 
             mv -f "$tmp" "$dest"
-            echo "Updated (SHA changed): $dest"
+            echo "EXISTS -> UPDATED (SHA changed): $dest"
           }
 
           echo "Auto-detecting folders in ./4.2/"
@@ -98,13 +96,6 @@ jobs:
 
           if [[ "$found" -eq 0 ]]; then
             echo "No subfolders found under 4.2/. Create folders like 4.2/GL 4.2/VNG etc."
-          fi
-
-          # ---- TEST MODE: force a commit every run ----
-          if [[ "$TEST_MODE" == "1" ]]; then
-            mkdir -p .sync
-            date -u +"%Y-%m-%d %H:%M:%S UTC" > .sync/last_run.txt
-            echo "TEST_MODE=ON -> updated .sync/last_run.txt to force commit"
           fi
 
       - name: Commit & push if changed

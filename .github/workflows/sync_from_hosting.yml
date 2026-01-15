@@ -1,8 +1,8 @@
-name: Sync games files from hosting
+name: Sync 4.2 from hosting (delete if missing)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -16,30 +16,49 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download all 4.2 files from hosting
+      - name: Sync folders (download if 200, delete if 404)
         run: |
           set -e
-          BASE_URL="https://nskmedia.net/rizwan/4.2"
-          TARGET="4.2"
+          BASE="https://nskmedia.net/rizwan/4.2"
+          mkdir -p 4.2
 
-          mkdir -p "$TARGET"
+          sync_one () {
+            DIR="$1"
+            FILE="libopenplatform.so"
+            URL="$BASE/$DIR/$FILE?cb=$(date +%s)"
+            OUT="4.2/$DIR/$FILE"
 
-          for DIR in GL KR TW VNG; do
-            mkdir -p "$TARGET/$DIR"
-            echo "Syncing $DIR..."
+            mkdir -p "4.2/$DIR"
 
-            curl -L --fail --retry 3 \
-              -o "$TARGET/$DIR/libopenplatform.so" \
-              "$BASE_URL/$DIR/libopenplatform.so?cb=$(date +%s)"
+            # Check if exists on hosting
+            CODE=$(curl -L -s -o /dev/null -w "%{http_code}" "$URL" || true)
+
+            if [ "$CODE" = "200" ]; then
+              echo "[$DIR] exists (200) -> downloading"
+              curl -L --fail --retry 3 --retry-delay 2 -o "$OUT" "$URL"
+            else
+              echo "[$DIR] missing ($CODE) -> deleting from GitHub if exists"
+              rm -f "$OUT"
+              # also remove empty dir if no files
+              rmdir "4.2/$DIR" 2>/dev/null || true
+            fi
+          }
+
+          for D in GL KR TW VNG; do
+            sync_one "$D"
           done
 
-          # status file
-          curl -L --fail --retry 3 \
-            -o "$TARGET/status" \
-            "$BASE_URL/status?cb=$(date +%s)"
+          # status file (same logic)
+          STATUS_URL="$BASE/status?cb=$(date +%s)"
+          STATUS_CODE=$(curl -L -s -o /dev/null -w "%{http_code}" "$STATUS_URL" || true)
+          if [ "$STATUS_CODE" = "200" ]; then
+            curl -L --fail --retry 3 --retry-delay 2 -o "4.2/status" "$STATUS_URL"
+          else
+            rm -f "4.2/status"
+          fi
 
       - name: Commit & push if changed
         run: |
@@ -47,10 +66,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           if git diff --quiet; then
-            echo "No changes detected"
+            echo "No changes"
             exit 0
           fi
 
           git add 4.2
-          git commit -m "Auto-sync 4.2 files from hosting"
+          git commit -m "Auto-sync 4.2 from hosting (with deletes)"
           git push

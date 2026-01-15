@@ -1,4 +1,4 @@
-name: Sync files (SHA compare)
+name: Sync 4.2 folders (auto-detect, SHA compare)
 
 on:
   schedule:
@@ -15,10 +15,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sync files (SHA compare + UA)
+      - name: Sync auto-detected folders (SHA + UA)
         shell: bash
         run: |
           set -euo pipefail
+
+          BASE_URL="https://nskmedia.net/rizwan/4.2"
+          FILE_NAME="libopenplatform.so"
+
+          # If you want "never delete on 404", set to 1
+          SAFE_MODE_KEEP_ON_404=0
 
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
@@ -34,18 +40,18 @@ jobs:
             echo "URL : $url"
             echo "DEST: $dest"
 
-            # download and capture HTTP status
             local code
             code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
             echo "HTTP: $code"
 
             if [[ "$code" == "404" ]]; then
-              echo "Remote 404 -> delete local if exists"
               rm -f "$tmp"
-              if [[ -f "$dest" ]]; then
-                rm -f "$dest"
-                echo "Deleted: $dest"
+              if [[ "$SAFE_MODE_KEEP_ON_404" == "1" ]]; then
+                echo "404 received, SAFE_MODE=ON -> keeping existing file"
+                return 0
               fi
+              echo "Remote 404 -> delete local if exists"
+              rm -f "$dest"
               return 0
             fi
 
@@ -75,9 +81,23 @@ jobs:
             echo "Updated (SHA changed): $dest"
           }
 
-          # ---- YOUR FILES ----
-          sync_one "https://nskmedia.net/rizwan/4.2/GL/libopenplatform.so"  "4.2/GL/libopenplatform.so"
-          sync_one "https://nskmedia.net/rizwan/4.2/VNG/libopenplatform.so" "4.2/VNG/libopenplatform.so"
+          echo "Auto-detecting folders in ./4.2/"
+          shopt -s nullglob
+          found=0
+
+          for d in 4.2/*/ ; do
+            found=1
+            folder="$(basename "$d")"
+
+            url="${BASE_URL}/${folder}/${FILE_NAME}"
+            dest="4.2/${folder}/${FILE_NAME}"
+
+            sync_one "$url" "$dest"
+          done
+
+          if [[ "$found" -eq 0 ]]; then
+            echo "No subfolders found under 4.2/. Create folders like 4.2/GL 4.2/VNG etc."
+          fi
 
       - name: Commit & push if changed
         shell: bash
@@ -94,5 +114,5 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Auto-sync from hosting (SHA compare)"
+          git commit -m "Auto-sync 4.2/* (SHA compare)"
           git push

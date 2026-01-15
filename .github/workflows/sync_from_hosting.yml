@@ -1,4 +1,4 @@
-name: Mirror hosting -> GitHub (4.2 folders)
+name: Mirror hosting -> GitHub (mixed paths + auto filename)
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: mirror-4-2
+  group: mirror-hosting
   cancel-in-progress: true
 
 jobs:
@@ -18,56 +18,96 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sync from hosting (200=keep/upload, 404=delete, SHA=update)
+      - name: Mirror hosting (200=upload/keep, 404=delete, SHA=update)
         shell: bash
         run: |
           set -euo pipefail
 
-          BASE_URL="https://nskmedia.net/rizwan/4.2"
-          FILE_NAME="libopenplatform.so"
+          # Base roots
+          BASE_ROOT="https://nskmedia.net/rizwan"
+          BASE_42="https://nskmedia.net/rizwan/4.2"
+
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
-          # All folders from your hosting screenshot (+ any already in repo)
-          fallback=(GL KR TW VNG BGMI BPSTOPHERE GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
+          # Folders that live under /rizwan/4.2/<folder>/
+          FOLDERS_42=(GL KR TW VNG)
 
-          sync_one () {
-            local folder="$1"
-            local url="${BASE_URL}/${folder}/${FILE_NAME}"
-            local dest="4.2/${folder}/${FILE_NAME}"
+          # Folders that live under /rizwan/<folder>/
+          FOLDERS_ROOT=(BGMI BPSTOPHERE GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
 
-            mkdir -p "4.2/${folder}"
+          # If folder listing is blocked, we will try these file names
+          FALLBACK_FILES=("libopenplatform.so")
+
+          is_in_array () {
+            local x="$1"; shift
+            for i in "$@"; do [[ "$i" == "$x" ]] && return 0; done
+            return 1
+          }
+
+          # Try to discover real file names from folder listing HTML (if available)
+          discover_files () {
+            local folder_url="$1"
+
+            # Fetch listing page (may be 200/403/etc)
+            local html code
+            html="$(mktemp)"
+            code="$(curl -L -A "$UA" -sS -o "$html" -w "%{http_code}" "${folder_url}/" || true)"
+
+            if [[ "$code" != "200" ]]; then
+              rm -f "$html"
+              return 1
+            fi
+
+            # Extract href="filename" entries, skip dirs, parent links, query links
+            # Works for common Apache/cPanel listings.
+            grep -Eo 'href="[^"]+"' "$html" \
+              | sed 's/^href="//; s/"$//' \
+              | grep -vE '^\?|^/|^\.\./|/$' \
+              | grep -E '\.' \
+              | sort -u
+
+            rm -f "$html"
+            return 0
+          }
+
+          sync_file () {
+            local url="$1"
+            local dest="$2"
+
+            mkdir -p "$(dirname "$dest")"
             local tmp
             tmp="$(mktemp)"
 
-            echo "----"
-            echo "FOLDER: $folder"
-            echo "URL   : $url"
-            echo "DEST  : $dest"
-
             local code
             code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
+
+            echo "URL : $url"
+            echo "DEST: $dest"
             echo "HTTP: $code"
 
+            # Hosting 404 -> delete from GitHub
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ -f "$dest" ]]; then
                 rm -f "$dest"
-                echo "HOSTING 404 -> DELETED from GitHub: $dest"
+                echo "HOSTING 404 -> DELETED: $dest"
               else
-                echo "HOSTING 404 -> already missing on GitHub: $dest"
+                echo "HOSTING 404 -> already missing: $dest"
               fi
               return 0
             fi
 
+            # Non-200/404 -> safe skip
             if [[ "$code" != "200" ]]; then
-              echo "HOSTING HTTP $code -> SKIP (no changes)"
               rm -f "$tmp"
+              echo "HOSTING HTTP $code -> SKIP (no changes)"
               return 0
             fi
 
+            # 200 -> upload/update by SHA
             if [[ ! -f "$dest" ]]; then
               mv -f "$tmp" "$dest"
-              echo "HOSTING 200 + GitHub missing -> UPLOADED: $dest"
+              echo "HOSTING 200 + missing -> UPLOADED: $dest"
               return 0
             fi
 
@@ -77,35 +117,58 @@ jobs:
 
             if [[ "$sha_new" == "$sha_old" ]]; then
               rm -f "$tmp"
-              echo "HOSTING same file -> NO CHANGE: $dest"
+              echo "HOSTING same -> NO CHANGE: $dest"
               return 0
             fi
 
             mv -f "$tmp" "$dest"
-            echo "HOSTING changed -> UPDATED on GitHub: $dest"
+            echo "HOSTING changed -> UPDATED: $dest"
           }
 
-          shopt -s nullglob
-          detected=()
-          for d in 4.2/*/ ; do
-            detected+=("$(basename "$d")")
-          done
+          process_folder () {
+            local folder="$1"
+            local base="$2"
+            local dest_prefix="$3"
 
-          folders=("${detected[@]}" "${fallback[@]}")
-          uniq=()
-          for f in "${folders[@]}"; do
-            [[ -z "$f" ]] && continue
-            if [[ ! " ${uniq[*]} " =~ " ${f} " ]]; then
-              uniq+=("$f")
+            local folder_url="${base}/${folder}"
+
+            echo "=============================="
+            echo "FOLDER: $folder"
+            echo "BASE  : $base"
+            echo "PATH  : $folder_url"
+            echo "DESTP : $dest_prefix"
+            echo "=============================="
+
+            # Try discover real files in this folder
+            mapfile -t files < <(discover_files "$folder_url" || true)
+
+            if [[ "${#files[@]}" -eq 0 ]]; then
+              # Fallback
+              files=("${FALLBACK_FILES[@]}")
+              echo "No listing found -> fallback files: ${files[*]}"
+            else
+              echo "Detected files: ${files[*]}"
             fi
+
+            # Sync each file
+            for fname in "${files[@]}"; do
+              local url="${folder_url}/${fname}"
+              local dest="${dest_prefix}/${folder}/${fname}"
+              sync_file "$url" "$dest"
+            done
+          }
+
+          # Sync /rizwan/4.2/<folder>/...  -> repo: 4.2/<folder>/...
+          for f in "${FOLDERS_42[@]}"; do
+            process_folder "$f" "$BASE_42" "4.2"
           done
 
-          echo "Folders to sync: ${uniq[*]}"
-          for folder in "${uniq[@]}"; do
-            sync_one "$folder"
+          # Sync /rizwan/<folder>/...      -> repo: <folder>/...
+          for f in "${FOLDERS_ROOT[@]}"; do
+            process_folder "$f" "$BASE_ROOT" "."
           done
 
-      - name: Commit & push if changed (handles non-fast-forward)
+      - name: Commit & push if changed (rebase + retry)
         shell: bash
         run: |
           set -euo pipefail
@@ -120,7 +183,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Mirror hosting 4.2 folders" || true
+          git commit -m "Mirror hosting folders" || true
 
           for i in 1 2 3; do
             git fetch origin main

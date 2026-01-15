@@ -38,12 +38,19 @@ jobs:
           # Default fallback (if folder listing is blocked)
           FALLBACK_DEFAULT=("libopenplatform.so")
 
-          # Folder-specific fallback (BGMI needs both files)
+          # Folder-specific fallback (BGMI + LOG)
           fallback_for_folder () {
             local folder="$1"
             case "$folder" in
-              BGMI) printf "%s\n" "libopenplatform.so" "libswappy.so" ;;
-              *)    printf "%s\n" "${FALLBACK_DEFAULT[@]}" ;;
+              BGMI)
+                printf "%s\n" "libopenplatform.so" "libswappy.so"
+                ;;
+              LOG)
+                printf "%s\n" "adb" "AdbWinApi"
+                ;;
+              *)
+                printf "%s\n" "${FALLBACK_DEFAULT[@]}"
+                ;;
             esac
           }
 
@@ -51,7 +58,6 @@ jobs:
           discover_files () {
             local folder_url="$1"
 
-            # Fetch listing page (may be 200/403/etc)
             local html code
             html="$(mktemp)"
             code="$(curl -L -A "$UA" -sS -o "$html" -w "%{http_code}" "${folder_url}/" || true)"
@@ -62,7 +68,6 @@ jobs:
             fi
 
             # Extract href="filename" entries, skip dirs, parent links, query links
-            # Works for common Apache/cPanel listings.
             grep -Eo 'href="[^"]+"' "$html" \
               | sed 's/^href="//; s/"$//' \
               | grep -vE '^\?|^/|^\.\./|/$' \
@@ -146,7 +151,7 @@ jobs:
             mapfile -t files < <(discover_files "$folder_url" || true)
 
             if [[ "${#files[@]}" -eq 0 ]]; then
-              # Folder-specific fallback
+              # Folder-specific fallback (BGMI / LOG)
               mapfile -t files < <(fallback_for_folder "$folder")
               echo "No listing found -> fallback files: ${files[*]}"
             else

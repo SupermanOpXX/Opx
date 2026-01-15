@@ -2,7 +2,7 @@ name: Sync 4.2 folders (auto-detect, SHA compare)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/1 * * * *"
   workflow_dispatch:
 
 jobs:

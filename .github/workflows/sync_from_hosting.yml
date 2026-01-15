@@ -2,8 +2,11 @@ name: Mirror hosting -> GitHub (mixed paths + auto filename)
 
 on:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: "*/5 * * * *"   # GitHub scheduler: practical minimum
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 concurrency:
   group: mirror-hosting
@@ -18,8 +21,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # (Optional but recommended) Always start from latest main
-      - name: Sync to latest main (before download)
+      - name: Ensure we're on latest default branch
         shell: bash
         run: |
           set -euo pipefail
@@ -31,41 +33,27 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Base roots
           BASE_ROOT="https://nskmedia.net/rizwan"
           BASE_42="https://nskmedia.net/rizwan/4.2"
 
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
-          # Folders that live under /rizwan/4.2/<folder>/
           FOLDERS_42=(GL KR TW VNG)
-
-          # Folders that live under /rizwan/<folder>/
           FOLDERS_ROOT=(BGMI GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
 
-          # Default fallback (if folder listing is blocked)
           FALLBACK_DEFAULT=("libopenplatform.so")
 
-          # Folder-specific fallback (BGMI + LOG)
           fallback_for_folder () {
             local folder="$1"
             case "$folder" in
-              BGMI)
-                printf "%s\n" "libopenplatform.so" "libswappy.so"
-                ;;
-              LOG)
-                printf "%s\n" "adb" "AdbWinApi"
-                ;;
-              *)
-                printf "%s\n" "${FALLBACK_DEFAULT[@]}"
-                ;;
+              BGMI) printf "%s\n" "libopenplatform.so" "libswappy.so" ;;
+              LOG)  printf "%s\n" "adb" "AdbWinApi" ;;
+              *)    printf "%s\n" "${FALLBACK_DEFAULT[@]}" ;;
             esac
           }
 
-          # Try to discover real file names from folder listing HTML (if available)
           discover_files () {
             local folder_url="$1"
-
             local html code
             html="$(mktemp)"
             code="$(curl -L -A "$UA" -sS -o "$html" -w "%{http_code}" "${folder_url}/" || true)"
@@ -75,7 +63,6 @@ jobs:
               return 1
             fi
 
-            # Extract href="filename" entries, skip dirs, parent links, query links
             grep -Eo 'href="[^"]+"' "$html" \
               | sed 's/^href="//; s/"$//' \
               | grep -vE '^\?|^/|^\.\./|/$' \
@@ -91,17 +78,15 @@ jobs:
             local dest="$2"
 
             mkdir -p "$(dirname "$dest")"
-            local tmp
+            local tmp code
             tmp="$(mktemp)"
 
-            local code
             code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
 
             echo "URL : $url"
             echo "DEST: $dest"
             echo "HTTP: $code"
 
-            # Hosting 404 -> delete from GitHub
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ -f "$dest" ]]; then
@@ -113,14 +98,12 @@ jobs:
               return 0
             fi
 
-            # Non-200/404 -> safe skip
             if [[ "$code" != "200" ]]; then
               rm -f "$tmp"
               echo "HOSTING HTTP $code -> SKIP (no changes)"
               return 0
             fi
 
-            # 200 -> upload/update by SHA
             if [[ ! -f "$dest" ]]; then
               mv -f "$tmp" "$dest"
               echo "HOSTING 200 + missing -> UPLOADED: $dest"
@@ -145,12 +128,10 @@ jobs:
             local folder="$1"
             local base="$2"
             local dest_prefix="$3"
-
             local folder_url="${base}/${folder}"
 
             echo "=============================="
             echo "FOLDER: $folder"
-            echo "BASE  : $base"
             echo "PATH  : $folder_url"
             echo "DESTP : $dest_prefix"
             echo "=============================="
@@ -165,9 +146,7 @@ jobs:
             fi
 
             for fname in "${files[@]}"; do
-              local url="${folder_url}/${fname}"
-              local dest="${dest_prefix}/${folder}/${fname}"
-              sync_file "$url" "$dest"
+              sync_file "${folder_url}/${fname}" "${dest_prefix}/${folder}/${fname}"
             done
           }
 
@@ -179,15 +158,12 @@ jobs:
             process_folder "$f" "$BASE_ROOT" "."
           done
 
-          # ✅ ADD: /rizwan/4.2/status -> 4.2/status
           echo "=============================="
           echo "SINGLE FILE: status (BASE_42)"
           echo "=============================="
-          STATUS_URL="${BASE_42}/status"
-          STATUS_DEST="4.2/status"
-          sync_file "$STATUS_URL" "$STATUS_DEST"
+          sync_file "${BASE_42}/status" "4.2/status"
 
-      - name: Commit & push if changed (safe rebase for binary)
+      - name: Commit & push if changed
         shell: bash
         run: |
           set -euo pipefail
@@ -195,50 +171,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Make sure merge driver "ours" exists (used by .gitattributes)
-          git config merge.ours.driver true
-
-          # If .gitattributes not in repo yet, create it automatically (optional)
-          if [[ ! -f .gitattributes ]]; then
-            cat > .gitattributes <<'EOF'
-          *.so merge=ours -text
-          *.dll merge=ours -text
-          *.exe merge=ours -text
-          EOF
-            git add .gitattributes
-          fi
-
           git add -A
-
           if git diff --cached --quiet; then
             echo "No changes"
             exit 0
           fi
 
-          git commit -m "Mirror hosting folders" || true
+          git commit -m "Mirror hosting folders"
 
-          # Retry: pull --rebase (auto resolves binaries via ours) then push
-          for i in 1 2 3; do
-            git fetch origin main
-            # keep our local commit but rebase on latest remote
-            if ! git pull --rebase --autostash origin main; then
-              git rebase --abort || true
-              echo "Rebase failed, retrying from fresh base... ($i)"
-              git fetch origin main
-              git reset --hard origin/main
-              # re-add changes from workspace (they are already in working tree from previous steps)
-              git add -A
-              git commit -m "Mirror hosting folders" || true
-            fi
-
-            if git push origin HEAD:main; then
-              echo "Push success"
-              exit 0
-            fi
-
-            echo "Push failed, retrying... ($i)"
-            sleep 2
-          done
-
-          echo "Push failed after retries"
-          exit 1
+          # Simple, stable push path for scheduled jobs
+          git pull --rebase --autostash origin main || true
+          git push origin HEAD:main

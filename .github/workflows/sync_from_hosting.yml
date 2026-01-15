@@ -18,6 +18,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # (Optional but recommended) Always start from latest main
+      - name: Sync to latest main (before download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+
       - name: Mirror hosting (200=upload/keep, 404=delete, SHA=update)
         shell: bash
         run: |
@@ -147,18 +155,15 @@ jobs:
             echo "DESTP : $dest_prefix"
             echo "=============================="
 
-            # Try discover real files in this folder
             mapfile -t files < <(discover_files "$folder_url" || true)
 
             if [[ "${#files[@]}" -eq 0 ]]; then
-              # Folder-specific fallback (BGMI / LOG)
               mapfile -t files < <(fallback_for_folder "$folder")
               echo "No listing found -> fallback files: ${files[*]}"
             else
               echo "Detected files: ${files[*]}"
             fi
 
-            # Sync each file
             for fname in "${files[@]}"; do
               local url="${folder_url}/${fname}"
               local dest="${dest_prefix}/${folder}/${fname}"
@@ -166,23 +171,34 @@ jobs:
             done
           }
 
-          # Sync /rizwan/4.2/<folder>/...  -> repo: 4.2/<folder>/...
           for f in "${FOLDERS_42[@]}"; do
             process_folder "$f" "$BASE_42" "4.2"
           done
 
-          # Sync /rizwan/<folder>/...      -> repo: <folder>/...
           for f in "${FOLDERS_ROOT[@]}"; do
             process_folder "$f" "$BASE_ROOT" "."
           done
 
-      - name: Commit & push if changed (rebase + retry)
+      - name: Commit & push if changed (safe rebase for binary)
         shell: bash
         run: |
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Make sure merge driver "ours" exists (used by .gitattributes)
+          git config merge.ours.driver true
+
+          # If .gitattributes not in repo yet, create it automatically (optional)
+          if [[ ! -f .gitattributes ]]; then
+            cat > .gitattributes <<'EOF'
+          *.so merge=ours -text
+          *.dll merge=ours -text
+          *.exe merge=ours -text
+          EOF
+            git add .gitattributes
+          fi
 
           git add -A
 
@@ -193,13 +209,25 @@ jobs:
 
           git commit -m "Mirror hosting folders" || true
 
+          # Retry: pull --rebase (auto resolves binaries via ours) then push
           for i in 1 2 3; do
             git fetch origin main
-            git rebase origin/main || (git rebase --abort && git pull --rebase origin main)
+            # keep our local commit but rebase on latest remote
+            if ! git pull --rebase --autostash origin main; then
+              git rebase --abort || true
+              echo "Rebase failed, retrying from fresh base... ($i)"
+              git fetch origin main
+              git reset --hard origin/main
+              # re-add changes from workspace (they are already in working tree from previous steps)
+              git add -A
+              git commit -m "Mirror hosting folders" || true
+            fi
+
             if git push origin HEAD:main; then
               echo "Push success"
               exit 0
             fi
+
             echo "Push failed, retrying... ($i)"
             sleep 2
           done

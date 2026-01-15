@@ -35,13 +35,16 @@ jobs:
           # Folders that live under /rizwan/<folder>/
           FOLDERS_ROOT=(BGMI BPSTOPHERE GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
 
-          # If folder listing is blocked, we will try these file names
-          FALLBACK_FILES=("libopenplatform.so")
+          # Default fallback (if folder listing is blocked)
+          FALLBACK_DEFAULT=("libopenplatform.so")
 
-          is_in_array () {
-            local x="$1"; shift
-            for i in "$@"; do [[ "$i" == "$x" ]] && return 0; done
-            return 1
+          # Folder-specific fallback (BGMI needs both files)
+          fallback_for_folder () {
+            local folder="$1"
+            case "$folder" in
+              BGMI) printf "%s\n" "libopenplatform.so" "libswappy.so" ;;
+              *)    printf "%s\n" "${FALLBACK_DEFAULT[@]}" ;;
+            esac
           }
 
           # Try to discover real file names from folder listing HTML (if available)
@@ -143,8 +146,8 @@ jobs:
             mapfile -t files < <(discover_files "$folder_url" || true)
 
             if [[ "${#files[@]}" -eq 0 ]]; then
-              # Fallback
-              files=("${FALLBACK_FILES[@]}")
+              # Folder-specific fallback
+              mapfile -t files < <(fallback_for_folder "$folder")
               echo "No listing found -> fallback files: ${files[*]}"
             else
               echo "Detected files: ${files[*]}"

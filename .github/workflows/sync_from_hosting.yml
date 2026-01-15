@@ -1,59 +1,102 @@
-name: Sync 4.2 from hosting (libs)
+name: Sync from Hosting (SHA compare)
 
 on:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
-
-permissions:
-  contents: write
-
-concurrency:
-  group: hosting-sync
-  cancel-in-progress: true
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # ✅ IMPORTANT: if your repo has *.so in .gitignore, this will still force add it.
-      - name: Download latest libs from hosting
+      - name: Sync files (SHA compare)
+        shell: bash
         run: |
-          set -e
-          BASE="https://nskmedia.net/rizwan/4.2"
-          FILE="libopenplatform.so"
+          set -euo pipefail
 
-          for DIR in GL KR TW VNG; do
-            mkdir -p "4.2/$DIR"
-            URL="$BASE/$DIR/$FILE?cb=$(date +%s)"
-            OUT="4.2/$DIR/$FILE"
-            echo "Downloading $URL -> $OUT"
-            curl -L --fail --retry 3 --retry-delay 2 -o "$OUT" "$URL"
-            ls -lah "4.2/$DIR" || true
-          done
+          sync_one () {
+            local url="$1"
+            local dest="$2"
 
-          # status file
-          curl -L --fail --retry 3 --retry-delay 2 \
-            -o "4.2/status" \
-            "$BASE/status?cb=$(date +%s)"
+            mkdir -p "$(dirname "$dest")"
+
+            local tmp
+            tmp="$(mktemp)"
+
+            echo "----"
+            echo "URL : $url"
+            echo "DEST: $dest"
+
+            # Download with HTTP status capture
+            local code
+            code="$(curl -L -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
+
+            if [[ "$code" == "404" ]]; then
+              echo "Remote 404 -> delete from repo if exists"
+              rm -f "$tmp"
+              if [[ -f "$dest" ]]; then
+                rm -f "$dest"
+                echo "Deleted: $dest"
+              else
+                echo "Already missing: $dest"
+              fi
+              return 0
+            fi
+
+            if [[ "$code" != "200" ]]; then
+              echo "Download failed (HTTP $code). Keeping existing."
+              rm -f "$tmp"
+              return 0
+            fi
+
+            # If file doesn't exist locally -> add
+            if [[ ! -f "$dest" ]]; then
+              mv -f "$tmp" "$dest"
+              echo "New file added: $dest"
+              return 0
+            fi
+
+            # Compare SHA
+            local sha_new sha_old
+            sha_new="$(sha256sum "$tmp" | awk '{print $1}')"
+            sha_old="$(sha256sum "$dest" | awk '{print $1}')"
+
+            if [[ "$sha_new" == "$sha_old" ]]; then
+              echo "Same SHA -> no change"
+              rm -f "$tmp"
+              return 0
+            fi
+
+            # Replace if changed
+            mv -f "$tmp" "$dest"
+            echo "Updated (SHA changed): $dest"
+          }
+
+          # ---- ADD YOUR FILES HERE ----
+          sync_one "https://nskmedia.net/rizwan/4.2/GL/libopenplatform.so"  "4.2/GL/libopenplatform.so"
+          sync_one "https://nskmedia.net/rizwan/4.2/VNG/libopenplatform.so" "4.2/VNG/libopenplatform.so"
+
+          echo "Done syncing."
 
       - name: Commit & push if changed
+        shell: bash
         run: |
           set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # ✅ Force-add libs even if .gitignore has *.so
-          git add -f 4.2/GL/libopenplatform.so 4.2/KR/libopenplatform.so 4.2/TW/libopenplatform.so 4.2/VNG/libopenplatform.so 4.2/status
+          git add -A
 
-          # If nothing staged, stop
           if git diff --cached --quiet; then
-            echo "No changes"
+            echo "No changes to commit"
             exit 0
           fi
 
-          git commit -m "Auto-sync 4.2 libs from hosting"
-          git push origin HEAD:main
+          git commit -m "Auto-sync from hosting (SHA compare)"
+          git push

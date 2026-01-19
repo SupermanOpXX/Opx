@@ -84,9 +84,13 @@ jobs:
             return 0
           }
 
+          # ------------------------------
+          # SYNC FILE + SAVE SHA SIDE-CAR
+          # ------------------------------
           sync_file () {
             local url="$1"
             local dest="$2"
+            local sha_file="${dest}.sha"   # <--- yahan SHA file banega (content SHA-256)
 
             mkdir -p "$(dirname "$dest")"
             local tmp
@@ -99,7 +103,7 @@ jobs:
             echo "DEST: $dest"
             echo "HTTP: $code"
 
-            # Hosting 404 -> delete from GitHub
+            # Hosting 404 -> delete from GitHub (file + .sha)
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ -f "$dest" ]]; then
@@ -108,35 +112,44 @@ jobs:
               else
                 echo "HOSTING 404 -> already missing: $dest"
               fi
+              # SHA sidecar bhi hata do
+              if [[ -f "$sha_file" ]]; then
+                rm -f "$sha_file"
+                echo "HOSTING 404 -> DELETED SHA: $sha_file"
+              fi
               return 0
             fi
 
             # Non-200/404 -> safe skip
             if [[ "$code" != "200" ]]; then
               rm -f "$tmp"
-              echo "HOSTING HTTP $code -> SKIP (no changes)"
+              echo "HOSTING HTTP $code -> SKIP (no changes, SHA unchanged)"
               return 0
             fi
 
-            # 200 -> upload/update by SHA
+            # 200 -> compare by SHA-256
+            local sha_new sha_old
+            sha_new="$(sha256sum "$tmp" | awk '{print $1}')"
+
             if [[ ! -f "$dest" ]]; then
               mv -f "$tmp" "$dest"
               echo "HOSTING 200 + missing -> UPLOADED: $dest"
-              return 0
+            else
+              sha_old="$(sha256sum "$dest" | awk '{print $1}')"
+              if [[ "$sha_new" == "$sha_old" ]]; then
+                rm -f "$tmp"
+                echo "HOSTING same -> NO CHANGE: $dest"
+              else
+                mv -f "$tmp" "$dest"
+                echo "HOSTING changed -> UPDATED: $dest"
+              fi
             fi
 
-            local sha_new sha_old
-            sha_new="$(sha256sum "$tmp" | awk '{print $1}')"
-            sha_old="$(sha256sum "$dest" | awk '{print $1}')"
-
-            if [[ "$sha_new" == "$sha_old" ]]; then
-              rm -f "$tmp"
-              echo "HOSTING same -> NO CHANGE: $dest"
-              return 0
+            # Har haal me (jab 200 mila) sidecar SHA file update karo
+            if [[ -f "$dest" ]]; then
+              echo "$sha_new" > "$sha_file"
+              echo "SHA256 -> $sha_file : $sha_new"
             fi
-
-            mv -f "$tmp" "$dest"
-            echo "HOSTING changed -> UPDATED: $dest"
           }
 
           process_folder () {

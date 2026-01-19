@@ -1,8 +1,6 @@
 name: Mirror hosting -> GitHub (mixed paths + auto filename)
 
 on:
-  schedule:
-    - cron: "*/1 * * * *"
   workflow_dispatch:
 
 concurrency:

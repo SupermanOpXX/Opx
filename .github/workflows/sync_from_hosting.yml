@@ -39,7 +39,7 @@ jobs:
           FOLDERS_42=(GL KR TW VNG)
 
           # Folders that live under /rizwan/<folder>/
-          FOLDERS_ROOT=(BGMI LOG TEST1 TEST2 TEST3 TEST4)
+          FOLDERS_ROOT=(BGMI GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
 
           # Default fallback (if folder listing is blocked)
           FALLBACK_DEFAULT=("libopenplatform.so")

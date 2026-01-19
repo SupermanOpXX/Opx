@@ -24,7 +24,7 @@ jobs:
           git fetch origin main
           git checkout -B main origin/main
 
-      - name: Mirror hosting (200=upload/keep, 404=delete, SHA=update)
+      - name: Mirror hosting (200=upload/keep, 404=delete)
         shell: bash
         run: |
           set -euo pipefail
@@ -85,12 +85,11 @@ jobs:
           }
 
           # ------------------------------
-          # SYNC FILE + SAVE SHA SIDE-CAR
+          # SYNC FILE (NO SIDE-CAR SHA)
           # ------------------------------
           sync_file () {
             local url="$1"
             local dest="$2"
-            local sha_file="${dest}.sha"   # <--- yahan SHA file banega (content SHA-256)
 
             mkdir -p "$(dirname "$dest")"
             local tmp
@@ -103,7 +102,7 @@ jobs:
             echo "DEST: $dest"
             echo "HTTP: $code"
 
-            # Hosting 404 -> delete from GitHub (file + .sha)
+            # Hosting 404 -> delete from GitHub
             if [[ "$code" == "404" ]]; then
               rm -f "$tmp"
               if [[ -f "$dest" ]]; then
@@ -112,22 +111,17 @@ jobs:
               else
                 echo "HOSTING 404 -> already missing: $dest"
               fi
-              # SHA sidecar bhi hata do
-              if [[ -f "$sha_file" ]]; then
-                rm -f "$sha_file"
-                echo "HOSTING 404 -> DELETED SHA: $sha_file"
-              fi
               return 0
             fi
 
             # Non-200/404 -> safe skip
             if [[ "$code" != "200" ]]; then
               rm -f "$tmp"
-              echo "HOSTING HTTP $code -> SKIP (no changes, SHA unchanged)"
+              echo "HOSTING HTTP $code -> SKIP (no changes)"
               return 0
             fi
 
-            # 200 -> compare by SHA-256
+            # 200 -> compare by SHA-256 (sirf compare, koi .sha file nahi)
             local sha_new sha_old
             sha_new="$(sha256sum "$tmp" | awk '{print $1}')"
 
@@ -143,12 +137,6 @@ jobs:
                 mv -f "$tmp" "$dest"
                 echo "HOSTING changed -> UPDATED: $dest"
               fi
-            fi
-
-            # Har haal me (jab 200 mila) sidecar SHA file update karo
-            if [[ -f "$dest" ]]; then
-              echo "$sha_new" > "$sha_file"
-              echo "SHA256 -> $sha_file : $sha_new"
             fi
           }
 
@@ -218,6 +206,9 @@ jobs:
           EOF
             git add .gitattributes
           fi
+
+          # 🔥 Purane jitne bhi *.sha files hain, sab hata do
+          find . -name "*.sha" -type f -print -delete || true
 
           git add -A
 

@@ -1,4 +1,4 @@
-name: Mirror hosting -> GitHub (atomic delete-first)
+name: Mirror hosting -> GitHub (SHA aware atomic)
 
 on:
   workflow_dispatch:
@@ -11,141 +11,93 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Sync to latest main
-        shell: bash
+      - name: Reset to latest main
         run: |
-          set -euo pipefail
           git fetch origin main
           git checkout -B main origin/main
 
-      - name: Mirror hosting (HARD DELETE → ADD)
+      - name: Mirror hosting (SHA + normal)
         shell: bash
         run: |
           set -euo pipefail
 
-          BASE_ROOT="https://nskmedia.net/rizwan"
-          BASE_42="https://nskmedia.net/rizwan/4.2"
+          BASE="https://nskmedia.net/rizwan"
+          BASE42="$BASE/4.2"
 
-          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
           FOLDERS_42=(GL KR TW VNG)
           FOLDERS_ROOT=(BGMI GLITCH LDPLAYER LOG TEST1 TEST2 TEST3 TEST4)
 
-          FALLBACK_DEFAULT=("libopenplatform.so")
+          mkdir -p /tmp/new
+          : > /tmp/delete.list
+          : > /tmp/add.list
 
-          fallback_for_folder () {
-            case "$1" in
-              BGMI) printf "%s\n" "libopenplatform.so" "libswappy.so" ;;
-              LOG)  printf "%s\n" "adb" "AdbWinApi" ;;
-              *)    printf "%s\n" "${FALLBACK_DEFAULT[@]}" ;;
-            esac
-          }
-
-          discover_files () {
-            local url="$1"
-            local html code
-            html="$(mktemp)"
-            code="$(curl -L -A "$UA" -sS -o "$html" -w "%{http_code}" "$url/" || true)"
-            [[ "$code" == "200" ]] || { rm -f "$html"; return 1; }
-            grep -Eo 'href="[^"]+"' "$html" \
-              | sed 's/^href="//;s/"$//' \
-              | grep -vE '^\?|^\.\./|/$' \
-              | grep -E '\.' \
-              | sort -u
-            rm -f "$html"
-          }
-
-          sync_file () {
+          sync_file() {
             local url="$1"
             local dest="$2"
 
             mkdir -p "$(dirname "$dest")"
 
-            local tmp code
-            tmp="$(mktemp)"
-            code="$(curl -L -A "$UA" -sS -o "$tmp" -w "%{http_code}" "$url" || true)"
+            code=$(curl -L -A "$UA" -s -o /tmp/tmp.bin -w "%{http_code}" "$url" || true)
 
             if [[ "$code" == "404" ]]; then
-              rm -f "$tmp"
-              [[ -f "$dest" ]] && { rm -f "$dest"; echo "$dest" >> /tmp/deletes.list; }
-              return 0
+              [[ -f "$dest" ]] && echo "$dest" >> /tmp/delete.list
+              return
             fi
 
-            [[ "$code" == "200" ]] || { rm -f "$tmp"; return 0; }
+            [[ "$code" == "200" ]] || return
 
-            local sha_new sha_old=""
-            sha_new="$(sha256sum "$tmp" | awk '{print $1}')"
-            [[ -f "$dest" ]] && sha_old="$(sha256sum "$dest" | awk '{print $1}')"
-
-            if [[ "$sha_new" != "$sha_old" ]]; then
-              [[ -f "$dest" ]] && { rm -f "$dest"; echo "$dest" >> /tmp/deletes.list; }
-              mkdir -p "/tmp/new/$(dirname "$dest")"
-              mv -f "$tmp" "/tmp/new/$dest"
-              echo "$dest" >> /tmp/adds.list
-            else
-              rm -f "$tmp"
+            if [[ -f "$dest" ]]; then
+              old=$(sha256sum "$dest" | cut -d' ' -f1)
+              new=$(sha256sum /tmp/tmp.bin | cut -d' ' -f1)
+              [[ "$old" == "$new" ]] && return
+              echo "$dest" >> /tmp/delete.list
             fi
-          }
 
-          process_folder () {
-            local folder="$1"
-            local base="$2"
-            local destp="$3"
-            local url="${base}/${folder}"
-
-            mapfile -t files < <(discover_files "$url" || fallback_for_folder "$folder")
-            for f in "${files[@]}"; do
-              sync_file "${url}/${f}" "${destp}/${folder}/${f}"
-            done
+            mkdir -p "/tmp/new/$(dirname "$dest")"
+            mv /tmp/tmp.bin "/tmp/new/$dest"
+            echo "$dest" >> /tmp/add.list
           }
 
           for f in "${FOLDERS_42[@]}"; do
-            process_folder "$f" "$BASE_42" "4.2"
+            sync_file "$BASE42/$f/libopenplatform.so" "4.2/$f/libopenplatform.so"
           done
 
           for f in "${FOLDERS_ROOT[@]}"; do
-            process_folder "$f" "$BASE_ROOT" "."
+            sync_file "$BASE/$f/libopenplatform.so" "$f/libopenplatform.so"
           done
 
-          # single status file
-          sync_file "${BASE_42}/status" "4.2/status"
-
-      - name: PHASE-1 Commit (HARD DELETE → force 404)
+      - name: PHASE 1 — HARD DELETE (SHA invalidation)
         shell: bash
         run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if [[ -f /tmp/deletes.list ]]; then
-            sort -u /tmp/deletes.list | while read -r f; do rm -f "$f"; done
+          if [[ -s /tmp/delete.list ]]; then
+            sort -u /tmp/delete.list | while read f; do rm -f "$f"; done
             git add -A
-            if ! git diff --cached --quiet; then
-              git commit -m "mirror: hard delete before update"
-              git push origin HEAD:main
-            fi
+            git commit -m "mirror: delete files (invalidate cache)"
+            git push origin main
           fi
 
-      - name: PHASE-2 Commit (ADD NEW FILES)
+      - name: PHASE 2 — ADD NEW FILES
         shell: bash
         run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if [[ -f /tmp/adds.list ]]; then
-            sort -u /tmp/adds.list | while read -r f; do
+          if [[ -s /tmp/add.list ]]; then
+            sort -u /tmp/add.list | while read f; do
               mkdir -p "$(dirname "$f")"
-              mv -f "/tmp/new/$f" "$f"
+              mv "/tmp/new/$f" "$f"
             done
             git add -A
-            if ! git diff --cached --quiet; then
-              git commit -m "mirror: add updated files"
-              git push origin HEAD:main
-            fi
+            git commit -m "mirror: add updated files"
+            git push origin main
           fi

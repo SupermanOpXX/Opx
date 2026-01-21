@@ -44,21 +44,31 @@ jobs:
 
             mkdir -p "$(dirname "$dest")"
 
+            local code
             code=$(curl -L -A "$UA" -s -o /tmp/tmp.bin -w "%{http_code}" "$url" || true)
 
             if [[ "$code" == "404" ]]; then
               [[ -f "$dest" ]] && echo "$dest" >> /tmp/delete.list
-              return
+              return 0
             fi
 
-            [[ "$code" == "200" ]] || return
+            [[ "$code" == "200" ]] || return 0
 
+            local old new
             if [[ -f "$dest" ]]; then
-              old=$(sha256sum "$dest" | cut -d' ' -f1)
-              new=$(sha256sum /tmp/tmp.bin | cut -d' ' -f1)
-              [[ "$old" == "$new" ]] && return
-              echo "$dest" >> /tmp/delete.list
+              old=$(sha256sum "$dest" | awk '{print $1}')
+            else
+              old=""
             fi
+
+            new=$(sha256sum /tmp/tmp.bin | awk '{print $1}')
+
+            if [[ "$old" == "$new" ]]; then
+              rm -f /tmp/tmp.bin
+              return 0
+            fi
+
+            [[ -n "$old" ]] && echo "$dest" >> /tmp/delete.list
 
             mkdir -p "/tmp/new/$(dirname "$dest")"
             mv /tmp/tmp.bin "/tmp/new/$dest"
@@ -73,8 +83,7 @@ jobs:
             sync_file "$BASE/$f/libopenplatform.so" "$f/libopenplatform.so"
           done
 
-      - name: PHASE 1 — HARD DELETE (SHA invalidation)
-        shell: bash
+      - name: PHASE 1 — HARD DELETE (invalidate cache)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -82,12 +91,13 @@ jobs:
           if [[ -s /tmp/delete.list ]]; then
             sort -u /tmp/delete.list | while read f; do rm -f "$f"; done
             git add -A
-            git commit -m "mirror: delete files (invalidate cache)"
+            git commit -m "mirror: delete files (cache invalidate)"
             git push origin main
+          else
+            echo "No files to delete"
           fi
 
       - name: PHASE 2 — ADD NEW FILES
-        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -100,4 +110,6 @@ jobs:
             git add -A
             git commit -m "mirror: add updated files"
             git push origin main
+          else
+            echo "No new files to add"
           fi
